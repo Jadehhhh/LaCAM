@@ -1,7 +1,7 @@
 ## build
 mkdir -p build && cd build\
 cmake -DCMAKE_BUILD_TYPE=Release ..\
-cmake --build . -j\
+cmake --build . -j
 
 ## Example run (200 agents, batch size 20):
 PYTHONUNBUFFERED=1 python new_try/run_batches.py \
