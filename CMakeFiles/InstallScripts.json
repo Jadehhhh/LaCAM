@@ -1,0 +1,12 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/jade2021/workspace25/LACAM/cmake_install.cmake",
+		"/Users/jade2021/workspace25/LACAM/lacam/cmake_install.cmake",
+		"/Users/jade2021/workspace25/LACAM/third_party/argparse/cmake_install.cmake",
+		"/Users/jade2021/workspace25/LACAM/third_party/googletest/cmake_install.cmake",
+		"/Users/jade2021/workspace25/LACAM/third_party/googletest/googlemock/cmake_install.cmake",
+		"/Users/jade2021/workspace25/LACAM/third_party/googletest/googletest/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
