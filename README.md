@@ -20,6 +20,9 @@ What it does:
 5. Assignment strategy = endpoint uniqueness + hotspot priority + tile balancing + (optional) nearest dispatch.
 
 ## If LaCAM gets stuck (no solution / timeout)
+When LaCAM stalls, it’s usually due to endpoint conflicts and congestion.
+For fair comparisons, when the number of agents is the same, keep all other parameters fixed (map, tasks, init positions, tiles, tile-cap, hotspot settings, seed, etc.) and only vary the parameter under study (e.g., --batch-size).
+
 1. Increase hotspot quota → raise --hot-min-per-wave (e.g., 20 → 50).
 Effect: more hotspot tasks are included together in the same wave → duplicates spread across different batches → fewer total waves.\
 2. Decrease tile capacity (or increase number of tiles) → lower --tile-cap (e.g., 80 → 40) or raise --tiles (e.g., 4 → 6).\
