@@ -1,9 +1,11 @@
 ## build
+```
 mkdir -p build && cd build\
 cmake -DCMAKE_BUILD_TYPE=Release ..\
 cmake --build . -j
-
+```
 ## Example run (200 agents, batch size 20):
+```
 PYTHONUNBUFFERED=1 python new_try/run_batches.py \
   --map smaller_batches/32x32_allEntry.map \
   --scen smaller_batches/all_tasks.scen \
@@ -15,6 +17,7 @@ PYTHONUNBUFFERED=1 python new_try/run_batches.py \
   --run-id N200_bs20_near \
   --verbose 2 \
   --prefer-near
+```
 
 ## smaller_batches/run_batches.py
 What it does:
