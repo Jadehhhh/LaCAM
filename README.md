@@ -6,7 +6,7 @@ cmake --build . -j
 ```
 ## Example run (200 agents, batch size 20):
 ```
-PYTHONUNBUFFERED=1 python new_try/run_batches.py \
+PYTHONUNBUFFERED=1 python smaller_batches/run_batches.py \
   --map smaller_batches/32x32_allEntry.map \
   --scen smaller_batches/all_tasks.scen \
   --agents 200 \
