@@ -1,3 +1,8 @@
+## build
+mkdir -p build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+cmake --build . -j
+
 ## Example run (200 agents, batch size 20):
 PYTHONUNBUFFERED=1 python new_try/run_batches.py \
   --map smaller_batches/32x32_allEntry.map \
