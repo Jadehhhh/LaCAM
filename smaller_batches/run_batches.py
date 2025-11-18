@@ -8,7 +8,13 @@ Key points:
 - Input to bridge uses "format: xy", and starts/goals are passed as "x,y x,y ..." (space-separated, no brackets).
 - The bridge output is "walkable cell IDs" (compact indices that skip obstacles); we map them back to (x, y) with id2xy.
 - paths_xy always "include the start": path[0] == start; when advancing step s use path[s], clamped via min().
-- Clearer logs: wave start / plan horizon / per-step events / trigger reasons / end-of-wave summary.
+- Batch triggering is based on the number of finished motion segments:
+    * A segment is considered finished when an agent first reaches either:
+        - the START of its current task (subphase: to_start → to_goal), or
+        - the GOAL of its current task (task completed, agent becomes free).
+- We additionally track:
+    * total_segments_done: how many such motion segments have finished over the entire run.
+    * total_tasks_done:    how many tasks have been fully completed (i.e., agent reached GOAL).
 """
 
 import argparse
@@ -29,29 +35,110 @@ def print_wave_header(wave_id, active_cnt, free_cnt, pending_left):
     print(f"\n=== WAVE {wave_id} START ===  active={active_cnt}  free={free_cnt}  pending_left={pending_left}")
 
 def print_bridge_plan(T_full, active_cnt):
-    print(f"[plan] T_full={T_full}  active={active_cnt}  (total steps)")
+    print(f"[plan] T_full={T_full}  active={active_cnt}  (total steps in LaCAM plan)")
 
-def print_step_debug(step, newly_to_start, newly_done, fin_since_assign, free_cnt, verbose=0):
+def print_step_debug(step, newly_to_start, newly_to_goal, fin_since_assign, free_cnt, verbose=0):
+    """
+    Per-step debug information (only printed when verbose >= 2):
+
+    - newly_to_start:
+        how many agents just reached the START of their current task at this step.
+    - newly_to_goal:
+        how many agents just reached the GOAL of their current task at this step.
+    - fin_since_assign:
+        how many motion segments (to START or GOAL) have finished since the last batch assignment.
+    - free_cnt:
+        number of free agents after processing this step.
+    """
     if verbose >= 2:
         print(
-            f"[STEP] s={step:>3}  +to_start={newly_to_start:<2}  +done={newly_done:<2}  "
-            f"fin_since_assign={fin_since_assign:<3}  free={free_cnt}"
+            f"[STEP] s={step:>3}  +reached_start={newly_to_start:<2}  "
+            f"+reached_goal={newly_to_goal:<2}  "
+            f"segments_since_assign={fin_since_assign:<3}  free_agents={free_cnt}"
         )
 
-def print_trigger(wave_id, q_want, q, got, scanned, skipped, pending_left):
+def print_trigger(wave_id, q_want, q, got, scanned, skipped_constraints, pending_left):
+    """
+    Log a batch-trigger event.
+
+    Parameters:
+        q_want:       how many segments just finished (we conceptually want to replenish this many).
+        q:            how many free agents we requested for new tasks
+                      (min of segments, free agents, pending tasks).
+        got:          how many agents actually received a new task.
+        scanned:      how many unassigned tasks were inspected in this assignment call.
+        skipped_constraints:
+                       among the scanned tasks, how many were rejected by hard constraints
+                       (endpoint conflicts, tile caps, etc.) and thus could NOT be used in this wave.
+        pending_left: how many tasks remain unassigned AFTER this assignment call.
+    """
     print(
-        f"[wave {wave_id}] TRIGGER  reason=batch  want={q_want}  q={q}  got={got}  "
-        f"scanned={scanned}  skipped~={skipped}  pending_left={pending_left}"
+        f"[wave {wave_id}] TRIGGER  reason=batch_segments  "
+        f"want_assign_for_segments={q_want}  requested_agents={q}  actually_assigned={got}  "
+        f"scanned_tasks={scanned}  skipped_by_constraints={skipped_constraints}  "
+        f"pending_left={pending_left}"
     )
 
 def print_wave_summary(
-    wave_id, steps_advanced, T_full, finished_this_wave, arrive_start_this_wave,
-    ts, tg, total_finished, makespan
+    wave_id,
+    steps_advanced,
+    T_full,
+    finished_segments_this_wave,
+    reached_start_this_wave,
+    tasks_done_this_wave,
+    active_to_start_after,
+    active_to_goal_after,
+    total_finished_segments,
+    total_tasks_done,
+    makespan
 ):
+    """
+    Per-wave summary (printed AFTER this wave finishes executing).
+
+    Metrics:
+
+    - steps_advanced / T_full:
+        how many timesteps we actually simulated in this wave vs. the full LaCAM plan length.
+
+    - finished_segments_this_wave:
+        how many motion segments finished in this wave.
+        A motion segment is counted when an agent FIRST reaches either:
+          * the START of its current task (to_start segment), or
+          * the GOAL of its current task (to_goal segment).
+
+    - reached_start_this_wave:
+        how many times agents reached a task START for the first time in this wave.
+        (This is a subset of finished_segments_this_wave; those segments ended at START.)
+
+    - tasks_done_this_wave:
+        how many tasks finished in this wave (i.e., how many times agents reached GOAL).
+
+    - active_to_start_after / active_to_goal_after:
+        number of agents that are still in subphase "to_start" / "to_goal"
+        at the end of this wave (i.e., after simulating steps_advanced steps).
+
+    - total_finished_segments:
+        total number of finished segments over the entire run so far.
+        Each full task can contribute up to 2 segments: one for reaching START, and one for reaching GOAL.
+
+    - total_tasks_done:
+        total number of fully completed tasks over the entire run so far
+        (i.e., total times agents have reached GOAL).
+
+    - makespan:
+        total number of timesteps advanced so far (sum of steps_advanced over all waves).
+    """
     print(
-        f"[wave {wave_id}] SUMMARY  steps={steps_advanced}/{T_full}  "
-        f"done+={finished_this_wave}  to_start+={arrive_start_this_wave}  "
-        f"TS={ts}  TG={tg}  total_done={total_finished}  makespan={makespan}"
+        f"[wave {wave_id}] SUMMARY  "
+        f"steps={steps_advanced}/{T_full}  "
+        f"segments_done_this_wave={finished_segments_this_wave}  "
+        f"reached_start_this_wave={reached_start_this_wave}  "
+        f"tasks_done_this_wave={tasks_done_this_wave}  "
+        f"active_to_start_after={active_to_start_after}  "
+        f"active_to_goal_after={active_to_goal_after}  "
+        f"total_segments_done={total_finished_segments}  "
+        f"total_tasks_done={total_tasks_done}  "
+        f"makespan={makespan}"
     )
 
 # ================= Map / task parsing =================
@@ -217,7 +304,10 @@ class AgentState:
         self.pos = tuple(pos)
         self.has_task = False
         self.task_idx = None
-        self.subphase = "to_start"  # 'to_start' | 'to_goal'
+        # subphase:
+        #   "to_start" - currently moving toward the START of the assigned task
+        #   "to_goal"  - currently moving toward the GOAL of the assigned task
+        self.subphase = "to_start"
 
 # ================= Main flow =================
 def main():
@@ -238,13 +328,13 @@ def main():
     ap.add_argument("--init-random", action="store_true")
     # Spatial balancing
     ap.add_argument("--tiles", type=int, default=4)
-    ap.add_argument("--tile-cap", type=int, default=50)
+    ap.add_argument("--tile-cap", type=int, default=20)
     ap.add_argument("--relax-threshold", type=int, default=20)
     # Nearest dispatch
     ap.add_argument("--prefer-near", action="store_true")
     # Hotspot control
     ap.add_argument("--hot-threshold", type=int, default=3)
-    ap.add_argument("--hot-min-per-wave", type=int, default=50)
+    ap.add_argument("--hot-min-per-wave", type=int, default=80)
     ap.add_argument("--tail-pack", type=int, default=20)
     # Early break near the end (optional)
     ap.add_argument(
@@ -299,6 +389,7 @@ def main():
         init_pos = [(tasks[i]["sx"], tasks[i]["sy"]) for i in range(args.agents)]
 
     agents = [AgentState(i, init_pos[i]) for i in range(args.agents)]
+    # free_ids: indices of agents that currently have no active task assigned.
     free_ids = list(range(args.agents))  # all idle at start
 
     # ---- Pending queue & assignment flags ----
@@ -313,7 +404,12 @@ def main():
         return (min(x // tile_w, args.tiles - 1), min(y // tile_h, args.tiles - 1))
 
     def active_endpoints():
-        """Collect (start, goal) only for active tasks; idle current positions are not endpoints."""
+        """
+        Collect (start, goal) only for active tasks; idle current positions are not endpoints.
+
+        This is used to enforce endpoint uniqueness within a single wave:
+        we do not want two tasks in the same wave to share the same START or GOAL.
+        """
         occ = set()
         for a in agents:
             if not a.has_task:
@@ -329,17 +425,31 @@ def main():
 
     # ---- Dispatcher: hotspots + nearest + spatial balancing ----
     def assign_from_pending_spatial_near(quota, relax_tiles=False):
+        """
+        Assign new tasks to free agents, with spatial balancing, hotspot prioritization,
+        and (optionally) nearest-dispatch.
+
+        Returns:
+            taken:                number of tasks actually assigned in this call.
+            scanned_total:        number of unassigned tasks that were inspected.
+            skipped_by_constraints:
+                                  among the scanned tasks, how many were rejected by hard constraints
+                                  (endpoint uniqueness, tile-cap, etc.) and thus could NOT be used
+                                  as candidates in this wave.
+        """
         if quota <= 0 or not free_ids:
             return 0, 0, 0
 
+        # How many tasks are still not assigned at all (global view BEFORE this call).
         pending_left = len([i for i in pending if not assigned_mask[i]])
         tail_boost = (pending_left <= args.tail_pack)
 
+        # Existing active endpoints: we cannot reuse these starts/goals within the same wave.
         occ_now = active_endpoints()
         used_tile_S = defaultdict(int)
         used_tile_G = defaultdict(int)
 
-        # Hotspot degree
+        # Compute hotspot degrees on the current snapshot of pending queue.
         snap = list(pending)
         deg = Counter()
         for idx in snap:
@@ -362,8 +472,10 @@ def main():
             t = tasks[idx]
             s = (t["sx"], t["sy"])
             g = (t["gx"], t["gy"])
+            # Hard endpoint uniqueness constraint.
             if s in occ_set or g in occ_set:
                 return False
+            # Optional tile caps (relaxed near the tail or when explicitly requested).
             if not (relax_tiles or tail_boost):
                 ts = tile_of_xy(*s)
                 tg = tile_of_xy(*g)
@@ -373,6 +485,8 @@ def main():
 
         candidates_all, candidates_hot = [], []
         scanned = 0
+        skipped_by_constraints = 0
+
         for score, idx in scored:
             if scanned >= len(snap):
                 break
@@ -380,6 +494,8 @@ def main():
             if assigned_mask[idx]:
                 continue
             if not can_use(idx, occ_now, used_tile_S, used_tile_G):
+                # We inspected this task but could not use it in this wave due to constraints.
+                skipped_by_constraints += 1
                 continue
             candidates_all.append(idx)
             if score >= args.hot_threshold:
@@ -397,6 +513,7 @@ def main():
                 def manhattan(a, s):
                     return abs(a.pos[0] - s[0]) + abs(a.pos[1] - s[1])
 
+                # Rank free agents by their best distance to any candidate START.
                 free_rank = []
                 for a in free_objs:
                     best = None
@@ -485,7 +602,7 @@ def main():
                     picked.add(idx)
                 return picked
 
-        # Prioritize hotspots (optional)
+        # Prioritize hotspot tasks (if any).
         hot_take = min(quota, max(0, args.hot_min_per_wave))
         hot_take = min(hot_take, len(candidates_hot))
         picked_hot = greedy_assign(candidates_hot, hot_take, occ_now, used_tile_S, used_tile_G)
@@ -505,7 +622,7 @@ def main():
         picked_set = set(picked_hot) | set(picked_rest)
         taken = len(picked_set)
 
-        # Re-queue scanned-but-not-assigned to the front to retry first next time
+        # Re-queue scanned-but-not-assigned tasks to the *front* so they are retried early next time.
         scanned_set = set(i for _, i in scored)
         new_q = deque()
         for _, idx in scored:
@@ -517,31 +634,65 @@ def main():
         pending.clear()
         pending.extend(new_q)
 
-        skipped_count = len([1 for _, idx in scored if idx not in picked_set])
-        return taken, len(scored), skipped_count
+        scanned_total = len(scored)
+        # skipped_by_constraints has already been accumulated.
+        return taken, scanned_total, skipped_by_constraints
 
-    # ---- Initial assignment (fill as much as possible)----
+    # ---- Initial assignment (fill as much as possible) ----
     want0 = args.agents
     got0, scanned0, skipped0 = assign_from_pending_spatial_near(want0, relax_tiles=True)
     if args.verbose >= 1:
-        print(f"[init] assigned={got0}, free={len(free_ids)}, pending_left={len(pending)}, skipped~={skipped0}")
+        print(
+            f"[init] assigned={got0}  free_agents={len(free_ids)}  "
+            f"pending_left={len(pending)}  skipped_tasks~={skipped0}"
+        )
 
     # ---- Stats ----
+    # makespan:
+    #   total number of timesteps advanced so far (sum of steps_advanced over all waves).
     makespan = 0
     wall_t0 = time.time()
+
+    # finished_since_assign:
+    #   counts how many motion segments (to START or to GOAL) have completed
+    #   since the last time we triggered a batch assignment and replanning.
+    #   When finished_since_assign >= batch_size, we trigger a new wave.
     finished_since_assign = 0
-    total_finished = 0
+
+    # total_segments_done:
+    #   total number of finished segments over the whole run.
+    #   Each full task (start + goal) can contribute up to 2 segments.
+    total_segments_done = 0
+
+    # total_tasks_done:
+    #   total number of fully completed tasks (agent reached GOAL) over the whole run.
+    total_tasks_done = 0
+
+    # wave_id:
+    #   index of the current LaCAM wave (each new batch / replanning increments this).
     wave_id = 0
 
     # ============ Main loop: single-phase replanning (step through; break as soon as batch is reached) ============
     while True:
-        # Wave header
+        # Wave header.
         active_cnt = sum(a.has_task for a in agents)
         pending_left_now = len([i for i in pending if not assigned_mask[i]])
         if args.verbose >= 1:
             print_wave_header(wave_id, active_cnt, len(free_ids), pending_left_now)
 
-        # If no active tasks: try assignment; else run planning
+        # Before calling LaCAM for this wave, report how many agents
+        # are currently heading toward task STARTs vs GOALs.
+        active_to_start_before = sum(a.has_task and a.subphase == 'to_start' for a in agents)
+        active_to_goal_before = sum(a.has_task and a.subphase == 'to_goal' for a in agents)
+        if args.verbose >= 1:
+            print(
+                f"[wave {wave_id}] STATE-BEFORE-PLAN  "
+                f"active_to_start={active_to_start_before}  "
+                f"active_to_goal={active_to_goal_before}  "
+                f"(agents currently moving to task STARTs / GOALs)"
+            )
+
+        # If no active tasks: try assignment; else run planning.
         if active_cnt == 0:
             remaining_unassigned = pending_left_now
             if remaining_unassigned > 0 and free_ids:
@@ -551,25 +702,31 @@ def main():
                 )
                 if args.verbose >= 1:
                     print(
-                        f"[wave {wave_id}] ASSIGN(first)  want={q}  got={got}  scanned={scanned}  "
-                        f"skipped~={skipped}  pending_left={remaining_unassigned - got}"
+                        f"[wave {wave_id}] ASSIGN(first)  want={q}  got={got}  "
+                        f"scanned_tasks={scanned}  skipped_tasks~={skipped}  "
+                        f"pending_left={remaining_unassigned - got}"
                     )
                 finished_since_assign = 0
                 if got == 0:
                     break
             else:
-                break  # all done
+                # No active tasks and no pending tasks left: we are done.
+                break
 
-        # --------- One LaCAM call: get full paths ---------
+        # --------- One LaCAM call: get full paths for all agents ---------
         _ = active_endpoints()
 
         starts = [a.pos for a in agents]
         goals = []
         for a in agents:
             if not a.has_task:
-                goals.append(a.pos)  # idle: stay
+                # Idle agents keep their position; they are effectively not moving in this wave.
+                goals.append(a.pos)
             else:
                 tsk = tasks[a.task_idx]
+                # Two-phase behavior:
+                #   - to_start: move to task START
+                #   - to_goal:  move to task GOAL
                 goals.append((tsk["sx"], tsk["sy"]) if a.subphase == "to_start" else (tsk["gx"], tsk["gy"]))
 
         try:
@@ -585,48 +742,74 @@ def main():
 
         # ---- Step forward; as soon as batch threshold is reached, break into next wave ----
         steps_advanced = 0
-        finished_this_wave = 0      # tasks completed (goal reached) in this wave
-        arrive_start_this_wave = 0  # #agents that reached their start in this wave (for logs)
+
+        # finished_segments_this_wave:
+        #   number of motion segments that finished in this wave
+        #   (reaching START or GOAL).
+        finished_segments_this_wave = 0
+
+        # arrive_start_this_wave:
+        #   number of times agents reached a task START in this wave.
+        arrive_start_this_wave = 0
+
+        # tasks_done_this_wave:
+        #   number of tasks finished in this wave (agent reached GOAL).
+        tasks_done_this_wave = 0
 
         while steps_advanced < T_full:
             steps_advanced += 1
 
-            # 1) Everyone moves one step (paths include start: take path[s], with clamp)
+            # 1) Everyone moves one step (paths include start: take path[s], with clamp).
             for i, a in enumerate(agents):
                 path = paths_xy[i]  # length = T_full + 1
                 a.pos = path[min(steps_advanced, len(path) - 1)]
 
-            # 2) Subphase switches & completion releases (count "newly completed / reached start" in this wave)
+            # 2) Subphase switches & completion releases.
             newly_free = []
             newly_to_start = 0
+            newly_to_goal = 0
+
             for a in agents:
                 if not a.has_task:
                     continue
                 tsk = tasks[a.task_idx]
                 if a.subphase == "to_start" and a.pos == (tsk["sx"], tsk["sy"]):
-                    a.subphase = "to_goal"  # reached start -> switch subphase only
+                    # Agent has just reached the START location of its current task.
+                    # This finishes the "to_start" segment; next it will move toward the GOAL.
+                    a.subphase = "to_goal"
                     newly_to_start += 1
                 elif a.subphase == "to_goal" and a.pos == (tsk["gx"], tsk["gy"]):
+                    # Agent has just reached the GOAL location of its current task.
+                    # This finishes the "to_goal" segment and the whole task; the agent becomes free.
                     a.has_task = False
                     a.task_idx = None
                     a.subphase = "to_start"
                     newly_free.append(a.id)
+                    newly_to_goal += 1
 
             if newly_to_start:
                 arrive_start_this_wave += newly_to_start
             if newly_free:
                 free_ids.extend(newly_free)
-                finished_since_assign += len(newly_free)
-                finished_this_wave += len(newly_free)
-                total_finished += len(newly_free)
 
-            # Per-step debug (only when verbose >= 2)
-            # print_step_debug(steps_advanced, newly_to_start, len(newly_free),
-            #                  finished_since_assign, len(free_ids), verbose=args.verbose)
+            # Count segments (START + GOAL) for triggering and reporting.
+            if newly_to_start or newly_to_goal:
+                seg_done = newly_to_start + newly_to_goal
+                finished_since_assign += seg_done        # for batch-triggering
+                finished_segments_this_wave += seg_done  # per-wave reporting
+                total_segments_done += seg_done          # global counter
 
-            # 3) Trigger "immediate replenish + break"
+            # Count tasks (only GOAL) for task statistics.
+            if newly_to_goal:
+                tasks_done_this_wave += newly_to_goal
+                total_tasks_done += newly_to_goal
+
+            # Optional: fine-grained per-step debug.
+          #  print_step_debug(steps_advanced,newly_to_start, newly_to_goal,finished_since_assign,len(free_ids),verbose=args.verbose )
+
+            # 3) Trigger "immediate replenish + break" once enough segments are done.
             remaining_unassigned = len([i for i in pending if not assigned_mask[i]])
-            if (finished_since_assign >= args.batch_size):
+            if finished_since_assign >= args.batch_size:
                 q_want = finished_since_assign
                 q = min(q_want, len(free_ids), remaining_unassigned)
 
@@ -636,26 +819,46 @@ def main():
                         q, relax_tiles=(sum(a.has_task for a in agents) < args.relax_threshold)
                     )
 
-                print_trigger(wave_id, q_want, q, got, scanned, skipped, remaining_unassigned - got)
+                remaining_unassigned_after = len([i for i in pending if not assigned_mask[i]])
+
+                print_trigger(
+                    wave_id,
+                    q_want,
+                    q,
+                    got,
+                    scanned,
+                    skipped,                 # skipped_by_constraints
+                    remaining_unassigned_after,
+                )
 
                 finished_since_assign = 0
-                break  # break current execution and enter the next wave
+                # Break the current execution and enter the next wave with updated assignments.
+                break
 
-        # 4) Accumulate steps advanced in this wave
+        # 4) Accumulate steps advanced in this wave.
         makespan += steps_advanced
 
-        # 5) Per-wave summary
+        # 5) Per-wave summary.
         if args.verbose >= 1:
-            ts = sum(a.has_task and a.subphase == 'to_start' for a in agents)
-            tg = sum(a.has_task and a.subphase == 'to_goal' for a in agents)
+            # These counts are taken AFTER we simulate this wave.
+            active_to_start_after = sum(a.has_task and a.subphase == 'to_start' for a in agents)
+            active_to_goal_after = sum(a.has_task and a.subphase == 'to_goal' for a in agents)
             print_wave_summary(
-                wave_id, steps_advanced, T_full,
-                finished_this_wave, arrive_start_this_wave,
-                ts, tg, total_finished, makespan
+                wave_id,
+                steps_advanced,
+                T_full,
+                finished_segments_this_wave,
+                arrive_start_this_wave,
+                tasks_done_this_wave,
+                active_to_start_after,
+                active_to_goal_after,
+                total_segments_done,
+                total_tasks_done,
+                makespan
             )
             if args.verbose >= 2:
                 subphase_cnt = Counter(a.subphase for a in agents if a.has_task)
-                print(f"[wave {wave_id}] subphase(after step)={dict(subphase_cnt)}")
+                print(f"[wave {wave_id}] ACTIVE-SUBPHASE-AFTER = {dict(subphase_cnt)}")
 
         wave_id += 1
 
@@ -694,7 +897,10 @@ def main():
         "tail_pack": args.tail_pack,
         "relax_threshold": args.relax_threshold,
         "early_break_slack": args.early_break_slack,
-        "timeout": None
+        "timeout": None,
+        # New JSON metrics:
+        "total_segments_done": total_segments_done,
+        "total_tasks_done": total_tasks_done,
     }
     print(json.dumps(out))
 
