@@ -1,117 +1,40 @@
-lacam
----
-[![MIT License](http://img.shields.io/badge/license-MIT-blue.svg?style=flat)](LICENSE)
-[![CI](https://github.com/Kei18/lacam/actions/workflows/ci.yml/badge.svg)](https://github.com/Kei18/fast-mapf/actions/workflows/ci.yml)
-
-The code repository of the paper ["LaCAM: Search-Based Algorithm for Quick Multi-Agent Pathfinding"](https://kei18.github.io/lacam) (AAAI-23).
-
-## Building
-
-All you need is [CMake](https://cmake.org/) (≥v3.16). The code is written in C++(17).
-
-First, clone this repo with submodules.
-
-```sh
-git clone --recursive https://github.com/Kei18/lacam.git
-cd lacam
+## build
 ```
-Then, build the project.
-
-```sh
-cmake -B build && make -C build
+mkdir -p build && cd build\
+cmake -DCMAKE_BUILD_TYPE=Release ..\
+cmake --build . -j
+```
+## Example run (200 agents, batch size 20):
+```
+PYTHONUNBUFFERED=1 python smaller_batches/run_batches.py \
+  --map smaller_batches/32x32_allEntry.map \
+  --scen smaller_batches/all_tasks.scen \
+  --agents 200 \
+  --batch-size 20 \
+  --init-random --seed 320 \
+  --bridge-exe ./build/lacam/lacam_bridge \
+  --csv results.csv \
+  --run-id N200_bs20_near \
+  --verbose 2 \
+  --prefer-near
 ```
 
-### Docker
+## smaller_batches/run_batches.py
+What it does:
+1. Runs batch rolling + single-phase replanning with LaCAM.
+2. Each wave: call lacam_bridge once to get full paths, step through them.
+3. When batch_size tasks finish, immediately assign new tasks and start the next wave.
+4. Agents move in two phases: to_start → to_goal; reaching goal frees the agent for reassignment.
+5. Assignment strategy = endpoint uniqueness + hotspot priority + tile balancing + (optional) nearest dispatch.
 
-You can also use the [docker](https://www.docker.com/) environment (based on Ubuntu18.04) instead of the native one.
+## If LaCAM gets stuck (no solution / timeout)
+When LaCAM stalls, it’s usually due to endpoint conflicts and congestion.
+For fair comparisons, when the number of agents is the same, keep all other parameters fixed (map, tasks, init positions, tiles, tile-cap, hotspot settings, seed, etc.) and only vary the parameter under study (e.g., --batch-size).
 
-```sh
-# ~10 min, mostly for CMake build
-docker compose up -d
-docker compose exec dev bash
-> cmake -B build && make -C build
-```
+1. Increase hotspot quota → raise --hot-min-per-wave (e.g., 20 → 50).
+Effect: more hotspot tasks are included together in the same wave → duplicates spread across different batches → fewer total waves.\
+2. Decrease tile capacity (or increase number of tiles) → lower --tile-cap (e.g., 80 → 40) or raise --tiles (e.g., 4 → 6).\
+Effect: limits how many tasks per region, encouraging spatial dispersion → reduces congestion at shared endpoints.
+3. Change random seed → set a different --seed (e.g., 0 → 42).\
+Effect: reshuffles initial positions and assignment order → may escape deadlock situations.
 
-## Usage
-
-```sh
-build/main -i assets/random-32-32-10-random-1.scen -m assets/random-32-32-10.map -N 50 -v 1
-```
-The result will be saved in `build/result.txt`.
-
-<details><summary>Output File</summary>
-
-This is an example output of `random-32-32-10-random-1.scen`.
-`(x, y)` denotes location.
-`(0, 0)` is the left-top point.
-`(x, 0)` is the location at `x`-th column and 1st row.
-
-```
-agents=50
-map_file=random-32-32-10.map
-solver=planner
-solved=1
-soc=1316
-soc_lb=1113
-makespan=55
-makespan_lb=53
-sum_of_loss=1191
-sum_of_loss_lb=1113
-comp_time=1
-seed=0
-starts=(11,6),(29,9),[...]
-goals=(7,18),(1,16),[...]
-solution=
-0:(11,6),(29,9),[...]
-1:(10,6),(29,10),[...]
-[...]
-```
-
-</details>
-
-You can find details of all parameters with:
-```sh
-build/main --help
-```
-
-## Visualizer
-
-[@Kei18/mapf-visualizer](https://github.com/kei18/mapf-visualizer) is available.
-
-## Experiments
-
-The experimental script is written in Julia ≥1.7.
-Setup may require around 10 minutes.
-
-```sh
-sh scripts/setup.sh
-```
-
-Edit the config file as you like.
-Examples are in `scripts/config` .
-The evaluation starts by following commands.
-
-```
-julia --project=scripts/ --threads=auto
-> include("scripts/eval.jl"); main("scripts/config/mapf-bench.yaml")
-```
-
-## Notes
-
-- The grid maps and scenarios in `assets/` are from [MAPF benchmarks](https://movingai.com/benchmarks/mapf.html).
-- The empirical data of the manuscript was obtained with [[exp/AAAI2023]](https://github.com/Kei18/lacam/releases/tag/exp%2FAAAI2023).
-- LaCAM with different design choices: see [[pilot/greedy]](https://github.com/Kei18/lacam/releases/tag/pilot%2Fgreedy) and [[pilot/dbs]](https://github.com/Kei18/lacam/releases/tag/pilot%2Fdbs)
-- `tests/` is not comprehensive. It was used in early developments.
-- Auto formatting (clang-format) when committing:
-
-```sh
-git config core.hooksPath .githooks && chmod a+x .githooks/pre-commit
-```
-
-## Licence
-
-This software is released under the MIT License, see [LICENSE.txt](LICENCE.txt).
-
-## Author
-
-[Keisuke Okumura](https://kei18.github.io) is a Ph.D. student at Tokyo Institute of Technology, interested in controlling multiple moving agents.
